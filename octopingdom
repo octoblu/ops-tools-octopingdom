@@ -1,0 +1,431 @@
+#!/bin/bash
+
+SCRIPT_NAME='octopingdom'
+
+assert_required_params() {
+  local json_path app_key username password
+  app_key="$1"
+  username="$2"
+  password="$3"
+  json_path="$4"
+
+  if [ -n "$json_path" ] && [ -f "$json_path" ] \
+    && [ -n "$app_key" ] \
+    && [ -n "$username" ] \
+    && [ -n "$password" ]; then
+    return 0
+  fi
+
+  usage 1>&2
+
+  if [ -z "$app_key" ]; then
+    err_echo "Missing -a, --app-key, or PINGDOM_APP_KEY argument"
+  fi
+
+  if [ -z "$password" ]; then
+    err_echo "Missing -p, --password, or PINGDOM_PASSWORD argument"
+  fi
+
+  if [ -z "$username" ]; then
+    err_echo "Missing -u, --username, or PINGDOM_USERNAME argument"
+  fi
+
+  if [ -z "$json_path" ]; then
+    err_echo "Missing </path/to/pindom.json> argument"
+  elif [ ! -f "$pingdom_json_path" ]; then
+    err_echo "Could not find a file at '$pingdom_json_path'"
+  fi
+
+
+  exit 1
+}
+
+assert_valid_check() {
+  local check_name pingdom_json_path pingdom_json id url
+  pingdom_json_path="$1"
+  check_name="$2"
+
+  pingdom_json="$(jq ".checks[\"$check_name\"]" "$pingdom_json_path")"
+  id="$(get_value "$pingdom_json" "id")"
+  url="$(get_value "$pingdom_json" "url")"
+
+  if [ "$id" != "null" ] && [ "$url" != "null" ]; then
+    return
+  fi
+
+  if [ "$id" == "null" ]; then
+    err_echo "key 'id' cannot be null for check '$check_name'"
+  fi
+
+  if [ "$url" == "null" ]; then
+    err_echo "key 'url' cannot be null for check '$check_name'"
+  fi
+
+  return 1
+}
+
+debug() {
+  local cyan='\033[0;36m'
+  local no_color='\033[0;0m'
+  local message="$@"
+  matches_debug || return 0
+  (>&2 echo -e "[${cyan}${SCRIPT_NAME}${no_color}]: $message")
+}
+
+err_echo() {
+  local message
+  message="$1"
+  echo "$message" 1>&2
+}
+
+matches_debug() {
+  if [ -z "$DEBUG" ]; then
+    return 1
+  fi
+  if [[ $SCRIPT_NAME == "$DEBUG" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+script_directory(){
+  local source="${BASH_SOURCE[0]}"
+  local dir=""
+
+  while [ -h "$source" ]; do # resolve $source until the file is no longer a symlink
+    dir="$( cd -P "$( dirname "$source" )" && pwd )"
+    source="$(readlink "$source")"
+    [[ $source != /* ]] && source="$dir/$source" # if $source was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+  done
+
+  dir="$( cd -P "$( dirname "$source" )" && pwd )"
+
+  echo "$dir"
+}
+
+usage(){
+  echo 'USAGE:'
+  echo "  ${SCRIPT_NAME} [OPTIONS] </path/to/pindom.json>"
+  echo ''
+  echo 'DESCRIPTION:'
+  echo '  Register pindom checks using JSON files'
+  echo ''
+  echo 'OPTIONS:'
+  echo '  -a, --app-key    pingdom API key (env: PINGDOM_APP_KEY)'
+  echo '  -h, --help       print this help text'
+  echo '  -n, --dry-run    do a dry run. (Like a normal run, but less wet)'
+  echo '  -p, --password   pingdom password (env: PINGDOM_PASSWORD)'
+  echo '  -u, --username   pingdom username (env: PINGDOM_USERNAME)'
+  echo '  -v, --version    print the version'
+  echo ''
+  echo 'ENVIRONMENT:'
+  echo '  DEBUG            print debug output'
+  echo ''
+}
+
+version(){
+  local directory
+  directory="$(script_directory)"
+
+  if [ -f "$directory/VERSION" ]; then
+    cat "$directory/VERSION"
+  else
+    echo "unknown-version"
+  fi
+}
+
+add_pingdom_checks() {
+  local check_name credentials dry_run formatted_contact_ids id pingdom_json_path url
+  credentials="$1"
+  dry_run="$2"
+  pingdom_json_path="$3"
+  check_name="$4"
+
+  formatted_contact_ids="$(get_formatted_contact_ids "$pingdom_json_path" "$check_name")"
+  id="$(get_id "$pingdom_json_path" "$check_name")"
+  url="$(get_url "$pingdom_json_path" "$check_name")"
+
+  create_pingdom_check "$credentials" "$dry_run" "$check_name" "$id" "$url" "$formatted_contact_ids"
+  # echo "$pingdom_check" | jq --compact-output --raw-output ".hosts[]" | while read host; do
+  #   local check_id="$(find_pingdom_check "$pingdom_check" "$service_name" "$host")"
+  #
+  #   if [ "$check_id" == "" ]; then
+  #     create_pingdom_check "$pingdom_check" "$service_name" "$host"
+  #   else
+  #     update_pingdom_check "$pingdom_check" "$service_name" "$host" "$check_id"
+  #   fi
+  # done
+}
+
+build_credentials() {
+  local app_key username password
+  app_key="$1"
+  username="$2"
+  password="$3"
+
+  jq \
+    --null-input \
+    --arg appKey "$app_key" \
+    --arg username "$username" \
+    --arg password "$password" \
+    '{} | .appKey = $appKey | .username = $username | .password = $password'
+}
+
+create_pingdom_check() {
+  local app_key cmd contact_ids credentials check_name dry_run id password username url
+  credentials="$1"
+  dry_run="$2"
+  check_name="$3"
+  id="$4"
+  url="$5"
+  contact_ids="$6"
+
+  debug "creating pingdom for [$check_name]($url)"
+
+  host="$(echo "$url" | sed -e 's/.*\/\///g' | sed -e 's/\/.*//g')"
+  path="$(echo "$url" | sed -e 's/.*\/\///g' | sed -e "s/$host//g")"
+
+  app_key="$(get_value "$credentials" 'appKey')"
+  username="$(get_value "$credentials" 'username')"
+  password="$(get_value "$credentials" 'password')"
+
+  cmd="
+    curl \
+      --silent \
+      --request POST \
+      --header 'App-Key: $app_key' \
+      --user '$username:$password' \
+      --data 'contactids=$contact_ids' \
+      --data 'encryption=true' \
+      --data 'host=$host' \
+      --data 'name=[$check_name]($url)' \
+      --data 'notifywhenbackup=true'
+      --data 'paused=false' \
+      --data 'resolution=1' \
+      --data 'sendtoemail=true' \
+      --data 'sendnotificationwhendown=5' \
+      --data 'tags=$id' \
+      --data 'type=http' \
+      --data 'url=$path' \
+      --data 'use_legacy_notifications=true' \
+      'https://api.pingdom.com/api/2.0/checks'
+  "
+
+  if [ "$dry_run" == "true" ]; then
+    echo "$cmd" | tr '\n' ' ' | sed -E -e "s/  +/ô  /g" | tr 'ô' '\n' | sed -e 's/  curl/curl/g'
+    return 0
+  fi
+
+  eval "$(echo "$cmd" | tr '\n' ' ')"
+}
+
+ensure_pingdom() {
+  local check_name credentials dry_run pingdom_json_path
+  credentials="$1"
+  dry_run="$2"
+  pingdom_json_path="$3"
+  check_name="$4"
+
+  assert_valid_check "$pingdom_json_path" "$check_name" || return 1
+  add_pingdom_checks "$credentials" "$dry_run" "$pingdom_json_path" "$check_name"
+}
+
+get_checks() {
+  local pingdom_json_path
+  pingdom_json_path="$1"
+
+  jq \
+    --compact-output \
+    --raw-output \
+    '.checks | keys[]' \
+    "$pingdom_json_path"
+}
+
+get_value() {
+  local json key
+  json="$1"
+  key="$2"
+
+  jq \
+    --null-input \
+    --raw-output \
+    --argjson input "$json" \
+    "\$input | .[\"$key\"]"
+}
+
+get_pingdom_check_options() {
+  local check_name name url
+  check_name="$1"
+  url="$2"
+
+  name="[$check_name]($url)"
+
+  echo "{\"name\": \"$name\"}"
+
+
+
+
+  # local name="$(get_service_full_name "$service_name")"
+  # local path="$(get_pingdom_path "$pingdom_check")"
+  # local tags="$(get_pingdom_tags "$pingdom_check" "$service_name")"
+  # local auth="$(echo "$pingdom_check" | jq --raw-output '.auth')"
+  # local should_contain="$(get_pingdom_should_contain "$pingdom_check")"
+  # local contact_ids="$(get_pingdom_contact_ids "$pingdom_check")"
+  #
+  # if [ "$auth" == "null" ]; then
+  #   auth=""
+  # fi
+  #
+  # local options
+  # options="$options --data host=$host"
+  # options="$options --data paused=false"
+  # options="$options --data resolution=1"
+  # options="$options --data encryption=true"
+  # options="$options --data sendtoemail=true"
+  # options="$options --data sendnotificationwhendown=5"
+  # options="$options --data notifywhenbackup=true"
+  # options="$options --data use_legacy_notifications=true"
+  #
+  # if [ "$contact_ids" != "" ]; then
+  #   options="$options --data contactids=$contact_ids"
+  # fi
+  # if [ "$should_contain" != "" ]; then
+  #   options="$options --data shouldcontain=$should_contain"
+  # fi
+  # if [ "$auth" != "" ]; then
+  #   options="$options --data auth=$auth"
+  # fi
+  # if [ "$name" != "" ]; then
+  #   options="$options --data name=$name-$host"
+  # fi
+  # if [ "$tags" != "" ]; then
+  #   options="$options --data tags=$tags"
+  # fi
+  # if [ "$path" != "" ]; then
+  #   options="$options --data url=$path"
+  # fi
+  #
+  # debug options "$options"
+  # echo "$options"
+}
+
+get_formatted_contact_ids() {
+  local check_json check_name pingdom_json_path
+  pingdom_json_path="$1"
+  check_name="$2"
+
+  check_json="$(jq --raw-output ".checks[\"$check_name\"]" "$pingdom_json_path")"
+  if [ "$(get_value "$check_json" "contact_ids")" == "null" ]; then
+    return 0
+  fi
+
+  jq \
+    --compact-output \
+    --raw-output \
+    --null-input \
+    --argjson "input" "$check_json" \
+    '$input | .contact_ids | join(",")'
+}
+
+get_id() {
+  local check_name pingdom_json_path
+  pingdom_json_path="$1"
+  check_name="$2"
+
+  jq \
+    --raw-output \
+    ".checks[\"$check_name\"].id" \
+    "$pingdom_json_path"
+}
+
+get_url() {
+  local check_name pingdom_json_path
+  pingdom_json_path="$1"
+  check_name="$2"
+
+  jq \
+    --compact-output \
+    --raw-output \
+    ".checks[\"$check_name\"].url" \
+    "$pingdom_json_path"
+}
+
+run() {
+  local checks credentials dry_run pingdom_json_path
+  credentials="$1"
+  dry_run="$2"
+  pingdom_json_path="$3"
+
+  checks=( $(get_checks "$pingdom_json_path") ) || return 1
+
+  for check in "${checks[@]}"; do
+    ensure_pingdom "$credentials" "$dry_run" "$pingdom_json_path" "$check" || return 1
+  done
+}
+
+main() {
+  local app_key credentials dry_run password pingdom_json_path username
+  # Define args up here
+  while [ "$1" != "" ]; do
+    local param="$1"
+    local value="$2"
+    case "$param" in
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -v | --version)
+        version
+        exit 0
+        ;;
+      -a | --app-key)
+        app_key="$value"
+        shift
+        ;;
+      -n | --dry-run)
+        dry_run='true'
+        ;;
+      -p | --password)
+        password="$value"
+        shift
+        ;;
+      -u | --username)
+        username="$value"
+        shift
+        ;;
+      # Arg with value
+      # -x | --example)
+      #   example="$value"
+      #   shift
+      #   ;;
+      # Arg without value
+      # -e | --example-flag)
+      #   example_flag='true'
+      #   ;;
+      *)
+        if [ "${param::1}" == '-' ]; then
+          echo "ERROR: unknown parameter \"$param\""
+          usage
+          exit 1
+        fi
+        # Set main arguments
+        if [ -z "$pingdom_json_path" ]; then
+          pingdom_json_path="$param"
+        # elif [ -z "$main_arg_2"]; then
+        #   main_arg_2="$param"
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  app_key="${app_key:-$PINGDOM_APP_KEY}"
+  username="${username:-$PINGDOM_USERNAME}"
+  password="${password:-$PINGDOM_PASSWORD}"
+
+  assert_required_params "$app_key" "$username" "$password" "$pingdom_json_path"
+  credentials="$(build_credentials "$app_key" "$username" "$password")" || exit 1
+  run "$credentials" "$dry_run" "$pingdom_json_path"
+}
+
+main "$@"
