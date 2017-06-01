@@ -124,6 +124,7 @@ usage(){
 }
 
 version(){
+  # HOMEBREW HOOK: early return version
   local directory
   directory="$(script_directory)"
 
@@ -135,7 +136,7 @@ version(){
 }
 
 add_pingdom_checks() {
-  local check_name credentials dry_run formatted_contact_ids id pingdom_json_path url
+  local check_name credentials dry_run existing_id formatted_contact_ids id pingdom_json_path url
   credentials="$1"
   dry_run="$2"
   pingdom_json_path="$3"
@@ -145,16 +146,14 @@ add_pingdom_checks() {
   id="$(get_id "$pingdom_json_path" "$check_name")"
   url="$(get_url "$pingdom_json_path" "$check_name")"
 
+  existing_id="$(find_existing_pingdom_id "$credentials" "$id")" || return 1
+
+  if [ -n "$existing_id" ]; then
+    update_pingdom_check "$credentials" "$dry_run" "$check_name" "$existing_id" "$id" "$url" "$formatted_contact_ids"
+    return $?
+  fi
+
   create_pingdom_check "$credentials" "$dry_run" "$check_name" "$id" "$url" "$formatted_contact_ids"
-  # echo "$pingdom_check" | jq --compact-output --raw-output ".hosts[]" | while read host; do
-  #   local check_id="$(find_pingdom_check "$pingdom_check" "$service_name" "$host")"
-  #
-  #   if [ "$check_id" == "" ]; then
-  #     create_pingdom_check "$pingdom_check" "$service_name" "$host"
-  #   else
-  #     update_pingdom_check "$pingdom_check" "$service_name" "$host" "$check_id"
-  #   fi
-  # done
 }
 
 build_credentials() {
@@ -191,6 +190,7 @@ create_pingdom_check() {
 
   cmd="
     curl \
+      --fail \
       --silent \
       --request POST \
       --header 'App-Key: $app_key' \
@@ -230,6 +230,37 @@ ensure_pingdom() {
   add_pingdom_checks "$credentials" "$dry_run" "$pingdom_json_path" "$check_name"
 }
 
+fetch_existing_pingdom_check_by_tag() {
+  local app_key credentials id password response username
+  credentials="$1"
+  id="$2"
+
+  app_key="$(get_value "$credentials" 'appKey')"
+  username="$(get_value "$credentials" 'username')"
+  password="$(get_value "$credentials" 'password')"
+
+  curl \
+    --fail \
+    --silent \
+    --header "App-Key: $app_key" \
+    --user "$username:$password" \
+    "https://api.pingdom.com/api/2.0/checks?tags=$id"
+}
+
+find_existing_pingdom_id() {
+  local count credentials id response
+  credentials="$1"
+  id="$2"
+
+  response="$(fetch_existing_pingdom_check_by_tag "$credentials" "$id")" || return 1
+  count="$(jq --null-input --raw-output --argjson input "$response" '$input | .checks | length')"
+
+  if [ "$count" == "0" ]; then
+    return 0
+  fi
+  echo "$(jq --null-input --raw-output --argjson input "$response" '$input | .checks[0]')"
+}
+
 get_checks() {
   local pingdom_json_path
   pingdom_json_path="$1"
@@ -251,62 +282,6 @@ get_value() {
     --raw-output \
     --argjson input "$json" \
     "\$input | .[\"$key\"]"
-}
-
-get_pingdom_check_options() {
-  local check_name name url
-  check_name="$1"
-  url="$2"
-
-  name="[$check_name]($url)"
-
-  echo "{\"name\": \"$name\"}"
-
-
-
-
-  # local name="$(get_service_full_name "$service_name")"
-  # local path="$(get_pingdom_path "$pingdom_check")"
-  # local tags="$(get_pingdom_tags "$pingdom_check" "$service_name")"
-  # local auth="$(echo "$pingdom_check" | jq --raw-output '.auth')"
-  # local should_contain="$(get_pingdom_should_contain "$pingdom_check")"
-  # local contact_ids="$(get_pingdom_contact_ids "$pingdom_check")"
-  #
-  # if [ "$auth" == "null" ]; then
-  #   auth=""
-  # fi
-  #
-  # local options
-  # options="$options --data host=$host"
-  # options="$options --data paused=false"
-  # options="$options --data resolution=1"
-  # options="$options --data encryption=true"
-  # options="$options --data sendtoemail=true"
-  # options="$options --data sendnotificationwhendown=5"
-  # options="$options --data notifywhenbackup=true"
-  # options="$options --data use_legacy_notifications=true"
-  #
-  # if [ "$contact_ids" != "" ]; then
-  #   options="$options --data contactids=$contact_ids"
-  # fi
-  # if [ "$should_contain" != "" ]; then
-  #   options="$options --data shouldcontain=$should_contain"
-  # fi
-  # if [ "$auth" != "" ]; then
-  #   options="$options --data auth=$auth"
-  # fi
-  # if [ "$name" != "" ]; then
-  #   options="$options --data name=$name-$host"
-  # fi
-  # if [ "$tags" != "" ]; then
-  #   options="$options --data tags=$tags"
-  # fi
-  # if [ "$path" != "" ]; then
-  #   options="$options --data url=$path"
-  # fi
-  #
-  # debug options "$options"
-  # echo "$options"
 }
 
 get_formatted_contact_ids() {
@@ -361,6 +336,57 @@ run() {
   for check in "${checks[@]}"; do
     ensure_pingdom "$credentials" "$dry_run" "$pingdom_json_path" "$check" || return 1
   done
+}
+
+update_pingdom_check() {
+  local app_key cmd contact_ids credentials check_name dry_run existing_id id password username url
+
+  credentials="$1"
+  dry_run="$2"
+  check_name="$3"
+  existing_id="$4"
+  id="$5"
+  url="$6"
+  contact_ids="$7"
+
+  debug "creating pingdom for [$check_name]($url)"
+
+  host="$(echo "$url" | sed -e 's/.*\/\///g' | sed -e 's/\/.*//g')"
+  path="$(echo "$url" | sed -e 's/.*\/\///g' | sed -e "s/$host//g")"
+
+  app_key="$(get_value "$credentials" 'appKey')"
+  username="$(get_value "$credentials" 'username')"
+  password="$(get_value "$credentials" 'password')"
+
+  cmd="
+    curl \
+      --fail \
+      --silent \
+      --request PUT \
+      --header 'App-Key: $app_key' \
+      --user '$username:$password' \
+      --data 'contactids=$contact_ids' \
+      --data 'encryption=true' \
+      --data 'host=$host' \
+      --data 'name=[$check_name]($url)' \
+      --data 'notifywhenbackup=true'
+      --data 'paused=false' \
+      --data 'resolution=1' \
+      --data 'sendtoemail=true' \
+      --data 'sendnotificationwhendown=5' \
+      --data 'tags=$id' \
+      --data 'type=http' \
+      --data 'url=$path' \
+      --data 'use_legacy_notifications=true' \
+      'https://api.pingdom.com/api/2.0/checks/$existing_id'
+  "
+
+  if [ "$dry_run" == "true" ]; then
+    echo "$cmd" | tr '\n' ' ' | sed -E -e "s/  +/ô  /g" | tr 'ô' '\n' | sed -e 's/  curl/curl/g'
+    return 0
+  fi
+
+  eval "$(echo "$cmd" | tr '\n' ' ')" > /dev/null
 }
 
 main() {
