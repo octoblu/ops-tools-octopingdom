@@ -150,25 +150,25 @@ version(){
 }
 
 add_pingdom_checks() {
-  local check_name credentials dry_run existing_id formatted_contact_ids id pingdom_json_path url
+  local check_name credentials dry_run existing_id formatted_contact_ids formatted_tags id pingdom_json_path url
   credentials="$1"
   dry_run="$2"
   pingdom_json_path="$3"
   check_name="$4"
 
   formatted_contact_ids="$(get_formatted_contact_ids "$pingdom_json_path" "$check_name")"
+  formatted_tags="$(get_tags "$pingdom_json_path" "$check_name")"
   id="$(get_id "$pingdom_json_path" "$check_name")"
-  tags="$(get_tags "$pingdom_json_path" "$check_name")"
   url="$(get_url "$pingdom_json_path" "$check_name")"
 
   existing_id="$(find_existing_pingdom_id "$credentials" "$id")" || return 1
 
   if [ -n "$existing_id" ]; then
-    update_pingdom_check "$credentials" "$dry_run" "$check_name" "$existing_id" "$id" "$url" "$formatted_contact_ids"
+    update_pingdom_check "$credentials" "$dry_run" "$check_name" "$existing_id" "$url" "$formatted_contact_ids" "$formatted_tags"
     return $?
   fi
 
-  create_pingdom_check "$credentials" "$dry_run" "$check_name" "$url" "$formatted_contact_ids" "$tags"
+  create_pingdom_check "$credentials" "$dry_run" "$check_name" "$url" "$formatted_contact_ids" "$formatted_tags"
 }
 
 build_credentials() {
@@ -368,15 +368,15 @@ run() {
 }
 
 update_pingdom_check() {
-  local app_key cmd contact_ids credentials check_name dry_run existing_id id password username url
+  local app_key cmd contact_ids credentials check_name dry_run existing_id password tags username url
 
   credentials="$1"
   dry_run="$2"
   check_name="$3"
   existing_id="$4"
-  id="$5"
-  url="$6"
-  contact_ids="$7"
+  url="$5"
+  contact_ids="$6"
+  tags="$7"
 
   debug "creating pingdom for [$check_name]($url)"
 
