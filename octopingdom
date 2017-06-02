@@ -2,6 +2,20 @@
 
 SCRIPT_NAME='octopingdom'
 
+assert_octopingdom_version() {
+  local pingdom_json_path file_version
+  pingdom_json_path="$1"
+
+  file_version="$(jq --raw-output '.octopingdom.version' "$pingdom_json_path")" || exit 1
+  current_version="$(version)"
+
+  if [ "$current_version" != "$file_version" ]; then
+    err_echo "The file at '$pingdom_json_path' requires"
+    err_echo "octopingdom '$file_version', running version is: '$current_version'"
+    exit 1
+  fi
+}
+
 assert_required_params() {
   local json_path app_key username password
   app_key="$1"
@@ -144,6 +158,7 @@ add_pingdom_checks() {
 
   formatted_contact_ids="$(get_formatted_contact_ids "$pingdom_json_path" "$check_name")"
   id="$(get_id "$pingdom_json_path" "$check_name")"
+  tags="$(get_tags "$pingdom_json_path" "$check_name")"
   url="$(get_url "$pingdom_json_path" "$check_name")"
 
   existing_id="$(find_existing_pingdom_id "$credentials" "$id")" || return 1
@@ -153,7 +168,7 @@ add_pingdom_checks() {
     return $?
   fi
 
-  create_pingdom_check "$credentials" "$dry_run" "$check_name" "$id" "$url" "$formatted_contact_ids"
+  create_pingdom_check "$credentials" "$dry_run" "$check_name" "$url" "$formatted_contact_ids" "$tags"
 }
 
 build_credentials() {
@@ -171,13 +186,13 @@ build_credentials() {
 }
 
 create_pingdom_check() {
-  local app_key cmd contact_ids credentials check_name dry_run id password username url
+  local app_key cmd contact_ids credentials check_name dry_run password tags username url
   credentials="$1"
   dry_run="$2"
   check_name="$3"
-  id="$4"
-  url="$5"
-  contact_ids="$6"
+  url="$4"
+  contact_ids="$5"
+  tags="$6"
 
   debug "creating pingdom for [$check_name]($url)"
 
@@ -204,7 +219,7 @@ create_pingdom_check() {
       --data 'resolution=1' \
       --data 'sendtoemail=true' \
       --data 'sendnotificationwhendown=5' \
-      --data 'tags=$id' \
+      --data 'tags=$tags' \
       --data 'type=http' \
       --data 'url=$path' \
       --data 'use_legacy_notifications=true' \
@@ -310,6 +325,20 @@ get_id() {
   jq \
     --raw-output \
     ".checks[\"$check_name\"].id" \
+    "$pingdom_json_path"
+}
+
+get_tags() {
+  local check_name id pingdom_json_path
+  pingdom_json_path="$1"
+  check_name="$2"
+
+  id="$(get_id "$pingdom_json_path" "$check_name")" || return 1
+
+  jq \
+    --raw-output \
+    --arg "id" "$id" \
+    '.tags |= .+ [$id] | .tags | join(",")' \
     "$pingdom_json_path"
 }
 
@@ -450,6 +479,7 @@ main() {
   password="${password:-$PINGDOM_PASSWORD}"
 
   assert_required_params "$app_key" "$username" "$password" "$pingdom_json_path"
+  assert_octopingdom_version "$pingdom_json_path"
   credentials="$(build_credentials "$app_key" "$username" "$password")" || exit 1
   run "$credentials" "$dry_run" "$pingdom_json_path"
 }
