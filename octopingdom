@@ -273,7 +273,7 @@ find_existing_pingdom_id() {
   if [ "$count" == "0" ]; then
     return 0
   fi
-  echo "$(jq --null-input --raw-output --argjson input "$response" '$input | .checks[0]')"
+  echo "$(jq --null-input --raw-output --argjson input "$response" '$input | .checks[0].id')"
 }
 
 get_checks() {
@@ -368,7 +368,7 @@ run() {
 }
 
 update_pingdom_check() {
-  local app_key cmd contact_ids credentials check_name dry_run existing_id password tags username url
+  local app_key cmd contact_ids credentials check_name dry_run existing_id password formatted_tags username url
 
   credentials="$1"
   dry_run="$2"
@@ -376,7 +376,7 @@ update_pingdom_check() {
   existing_id="$4"
   url="$5"
   contact_ids="$6"
-  tags="$7"
+  formatted_tags="$7"
 
   debug "creating pingdom for [$check_name]($url)"
 
@@ -403,8 +403,7 @@ update_pingdom_check() {
       --data 'resolution=1' \
       --data 'sendtoemail=true' \
       --data 'sendnotificationwhendown=5' \
-      --data 'tags=$id' \
-      --data 'type=http' \
+      --data 'tags=$formatted_tags' \
       --data 'url=$path' \
       --data 'use_legacy_notifications=true' \
       'https://api.pingdom.com/api/2.0/checks/$existing_id'
@@ -415,7 +414,16 @@ update_pingdom_check() {
     return 0
   fi
 
-  eval "$(echo "$cmd" | tr '\n' ' ')" > /dev/null
+  curl_output="$(eval "$(echo "$cmd" | tr '\n' ' ')")"
+  curl_exit_code=$?
+
+  if [ "$curl_exit_code" != "0" ]; then
+    err_echo "Curl Error"
+    err_echo "$curl_output"
+    return 1
+  fi
+
+  return 0
 }
 
 main() {
